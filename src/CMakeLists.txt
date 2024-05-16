@@ -1,0 +1,5 @@
+add_library(beast STATIC beast.cpp)
+target_link_libraries(beast Fcitx5::Core)
+configure_file(beast.conf.in.in beast.conf.in @ONLY)
+fcitx5_translate_desktop_file(${CMAKE_CURRENT_BINARY_DIR}/beast.conf.in beast.conf)
+install(FILES "${CMAKE_CURRENT_BINARY_DIR}/beast.conf" DESTINATION "${CMAKE_INSTALL_PREFIX}/share/fcitx5/addon")
