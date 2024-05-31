@@ -4,6 +4,6 @@ Comment=Interact with fcitx5 via HTTP, powered by Boost.Beast
 Category=Module
 Version=@PROJECT_VERSION@
 Library=libbeast
-Type=StaticLibrary
+Type=@ADDON_TYPE@
 OnDemand=False
 Configurable=True
