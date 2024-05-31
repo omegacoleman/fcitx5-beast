@@ -1,7 +1,14 @@
 #include "beast.h"
+#include <boost/asio/generic/stream_protocol.hpp>
+#include <boost/asio/local/stream_protocol.hpp>
 #include <boost/beast/core.hpp>
 #include <boost/beast/http.hpp>
 #include <fcitx-config/iniparser.h>
+
+#ifdef FCITX5_BEAST_HAS_UNIX_SOCKET
+// For unlink(2)
+#include <unistd.h>
+#endif
 
 namespace beast = boost::beast;
 namespace http = beast::http;
@@ -31,16 +38,18 @@ void Beast::reloadConfig() {
     startThread();
 }
 
-class http_connection : public std::enable_shared_from_this<http_connection> {
+template <class Socket>
+class http_connection
+    : public std::enable_shared_from_this<http_connection<Socket>> {
 public:
-    http_connection(tcp::socket socket) : socket_(std::move(socket)) {}
+    http_connection(Socket socket) : socket_(std::move(socket)) {}
 
     // Initiate the asynchronous operations associated with the connection.
     void start() { read_request(); }
 
 private:
     // The socket for the currently connected client.
-    tcp::socket socket_;
+    Socket socket_;
 
     // The buffer for performing reads.
     beast::flat_buffer buffer_{8192};
@@ -53,7 +62,7 @@ private:
 
     // Asynchronously receive a complete request message.
     void read_request() {
-        auto self = shared_from_this();
+        auto self = this->shared_from_this();
 
         http::async_read(
             socket_, buffer_, request_,
@@ -122,39 +131,53 @@ private:
 
     // Asynchronously transmit the response message.
     void write_response() {
-        auto self = shared_from_this();
+        auto self = this->shared_from_this();
 
         response_.content_length(response_.body().size());
 
-        http::async_write(
-            socket_, response_, [self](beast::error_code ec, std::size_t) {
-                self->socket_.shutdown(tcp::socket::shutdown_send, ec);
-            });
+        http::async_write(socket_, response_,
+                          [self](beast::error_code ec, std::size_t) {
+                              self->socket_.shutdown(Socket::shutdown_send, ec);
+                          });
         FCITX_INFO() << response_.result_int() << " "
                      << request_.method_string() << " " << request_.target();
     }
 };
 
 // "Loop" forever accepting new connections.
-void http_server(tcp::acceptor &acceptor, tcp::socket &socket) {
+template <class Acceptor, class Socket>
+void http_server(Acceptor &acceptor, Socket &socket) {
     acceptor.async_accept(socket, [&](beast::error_code ec) {
         if (!ec)
-            std::make_shared<http_connection>(std::move(socket))->start();
+            std::make_shared<http_connection<Socket>>(std::move(socket))
+                ->start();
         http_server(acceptor, socket);
     });
 }
 
 void Beast::startServer() {
-    auto const address = asio::ip::make_address("127.0.0.1");
-
     ioc = std::make_shared<asio::io_context>();
 
-    // Create and bind the endpoint
-    asio::ip::tcp::acceptor acceptor{
-        *ioc, {address, (unsigned short)config_.port.value()}};
-    asio::ip::tcp::socket socket{*ioc};
-    http_server(acceptor, socket);
-    ioc->run();
+#ifdef FCITX5_BEAST_HAS_UNIX_SOCKET
+    if (config_.communication.value() == BeastCommunication::UnixSocket) {
+        auto path = config_.unix_socket.value().path.value();
+        (void)::unlink(path.c_str());
+        auto const ep = asio::local::stream_protocol::endpoint{path};
+        asio::local::stream_protocol::acceptor acceptor{*ioc, ep};
+        asio::local::stream_protocol::socket socket{*ioc};
+        http_server(acceptor, socket);
+        ioc->run();
+    } else {
+#endif
+        auto const address = asio::ip::make_address("127.0.0.1");
+        tcp::acceptor acceptor{
+            *ioc, {address, (unsigned short)config_.tcp.value().port.value()}};
+        tcp::socket socket{*ioc};
+        http_server(acceptor, socket);
+        ioc->run();
+#ifdef FCITX5_BEAST_HAS_UNIX_SOCKET
+    }
+#endif
 }
 
 void Beast::startThread() {
