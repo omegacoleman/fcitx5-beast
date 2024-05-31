@@ -1,5 +1,17 @@
-add_library(beast STATIC beast.cpp)
-target_link_libraries(beast Fcitx5::Core)
+
+if (${ADDON_TYPE} STREQUAL "StaticLibrary")
+    add_library(beast STATIC beast.cpp)
+    target_link_libraries(beast Fcitx5::Core)
+endif()
+
+if (${ADDON_TYPE} STREQUAL "SharedLibrary")
+    set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+    add_library(beast SHARED beast.cpp)
+    target_link_libraries(beast Fcitx5::Core)
+    target_compile_definitions(beast PUBLIC FCITX_BEAST_IS_SHARED)
+    install(TARGETS beast DESTINATION "${CMAKE_INSTALL_LIBDIR}/fcitx5")
+endif()
+
 configure_file(beast.conf.in.in beast.conf.in @ONLY)
 fcitx5_translate_desktop_file(${CMAKE_CURRENT_BINARY_DIR}/beast.conf.in beast.conf)
 install(FILES "${CMAKE_CURRENT_BINARY_DIR}/beast.conf" DESTINATION "${CMAKE_INSTALL_PREFIX}/share/fcitx5/addon")
