@@ -27,6 +27,12 @@ int main() {
     auto beast = dynamic_cast<Beast *>(instance.addonManager().addon("beast"));
     assert(beast);
 
+    RawConfig default_port_raw;
+    BeastConfig default_port_cfg;
+    default_port_cfg.communication.setValue(BeastCommunication::Tcp);
+    default_port_cfg.save(default_port_raw);
+    beast->setConfig(default_port_raw);
+
     bool getterCalled = false;
     bool setterCalled = false;
 
@@ -60,7 +66,8 @@ int main() {
     RawConfig raw;
     config->dumpDescription(raw);
     BeastConfig cfg;
-    cfg.port.setValue(32490);
+    cfg.communication.setValue(BeastCommunication::Tcp);
+    cfg.tcp.mutableValue()->port.setValue(32490);
     cfg.save(raw);
     beast->setConfig(raw);
 
