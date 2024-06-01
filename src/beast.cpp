@@ -1,9 +1,17 @@
 #include "beast.h"
+
 #include <boost/asio/generic/stream_protocol.hpp>
 #include <boost/asio/local/stream_protocol.hpp>
 #include <boost/beast/core.hpp>
 #include <boost/beast/http.hpp>
+
 #include <fcitx-config/iniparser.h>
+#include <fcitx/inputcontextmanager.h>
+#include <unistd.h>
+
+#include "config/config-public.h"
+
+#include "nlohmann/json.hpp"
 
 #ifdef FCITX5_BEAST_HAS_UNIX_SOCKET
 // For unlink(2)
@@ -15,14 +23,46 @@ namespace http = beast::http;
 namespace net = boost::asio;
 using tcp = boost::asio::ip::tcp;
 
+nlohmann::json configToJson(const fcitx::Configuration &config);
+
 namespace fcitx {
 
-ConfigSetter configSetter_ = [](const char *, const char *) {};
-ConfigGetter configGetter_ = [](const char *) { return ""; };
-
-Beast::Beast(Instance *instance) : instance_(instance) { reloadConfig(); }
+Beast::Beast(Instance *instance) : instance_(instance) {
+    dispatcher_.attach(&instance->eventLoop());
+    reloadConfig();
+}
 
 Beast::~Beast() { stopThread(); }
+
+std::string Beast::routedGetConfig(const std::string& uri) {
+    std::promise<std::string> prom;
+    auto fut = prom.get_future();
+    dispatcher_.schedule([this, &uri, &prom](){
+        try {
+            prom.set_value(getInstanceConfig(uri, this->instance_));
+        } catch (...) {
+            prom.set_exception(std::current_exception());
+        }
+    });
+    return fut.get();
+}
+
+std::string Beast::routedSetConfig(const std::string& uri, const char* data, size_t sz) {
+    std::promise<bool> prom;
+    auto fut = prom.get_future();
+    dispatcher_.schedule([this, &uri, &prom, data, sz](){
+        try {
+            prom.set_value(setInstanceConfig(uri, data, sz, this->instance_));
+        } catch (...) {
+            prom.set_exception(std::current_exception());
+        }
+    });
+    if (!fut.get()) {
+      return nlohmann::json{{"ERROR", "Failed to set config"}}.dump();
+    } else {
+      return nlohmann::json{{}}.dump();
+    }
+}
 
 void Beast::setConfig(const RawConfig &config) {
     config_.load(config);
@@ -31,18 +71,20 @@ void Beast::setConfig(const RawConfig &config) {
 }
 
 void Beast::reloadConfig() {
-    if (serverThread_.joinable()) {
-        stopThread();
-    }
-    readAsIni(config_, ConfPath);
-    startThread();
+    dispatcher_.schedule([this](){
+        if (this->serverThread_.joinable()) {
+            this->stopThread();
+        }
+        readAsIni(config_, ConfPath);
+        this->startThread();
+    });
 }
 
 template <class Socket>
 class http_connection
     : public std::enable_shared_from_this<http_connection<Socket>> {
 public:
-    http_connection(Socket socket) : socket_(std::move(socket)) {}
+    http_connection(Socket socket, Beast *addon) : socket_(std::move(socket)), addon_(addon) {}
 
     // Initiate the asynchronous operations associated with the connection.
     void start() { read_request(); }
@@ -59,6 +101,9 @@ private:
 
     // The response message.
     http::response<http::dynamic_body> response_;
+
+    // The addon.
+    Beast* addon_;
 
     // Asynchronously receive a complete request message.
     void read_request() {
@@ -115,12 +160,11 @@ private:
             if (request_.method() == http::verb::get) {
                 response_.result(http::status::ok);
                 response_.set(http::field::content_type, "application/json");
-                beast::ostream(response_.body()) << configGetter_(uri.c_str());
+                beast::ostream(response_.body()) << addon_->routedGetConfig(uri.c_str());
             } else if (request_.method() == http::verb::post) {
                 response_.result(http::status::ok);
-                response_.set(http::field::content_type, "text/plain");
-                beast::ostream(response_.body()) << "";
-                configSetter_(uri.c_str(), request_.body().data());
+                response_.set(http::field::content_type, "application/json");
+                beast::ostream(response_.body()) << addon_->routedSetConfig(uri.c_str(), request_.body().data(), request_.body().size());
             }
         } else {
             response_.result(http::status::not_found);
@@ -146,12 +190,11 @@ private:
 
 // "Loop" forever accepting new connections.
 template <class Acceptor, class Socket>
-void http_server(Acceptor &acceptor, Socket &socket) {
-    acceptor.async_accept(socket, [&](beast::error_code ec) {
+void http_server(Acceptor &acceptor, Socket &socket, Beast* addon) {
+    acceptor.async_accept(socket, [&acceptor, &socket, addon](beast::error_code ec) {
         if (!ec)
-            std::make_shared<http_connection<Socket>>(std::move(socket))
-                ->start();
-        http_server(acceptor, socket);
+            std::make_shared<http_connection<Socket>>(std::move(socket), addon)->start();
+        http_server(acceptor, socket, addon);
     });
 }
 
@@ -165,7 +208,7 @@ void Beast::startServer() {
         auto const ep = asio::local::stream_protocol::endpoint{path};
         asio::local::stream_protocol::acceptor acceptor{*ioc, ep};
         asio::local::stream_protocol::socket socket{*ioc};
-        http_server(acceptor, socket);
+        http_server(acceptor, socket, this);
         ioc->run();
     } else {
 #endif
@@ -173,7 +216,7 @@ void Beast::startServer() {
         tcp::acceptor acceptor{
             *ioc, {address, (unsigned short)config_.tcp.value().port.value()}};
         tcp::socket socket{*ioc};
-        http_server(acceptor, socket);
+        http_server(acceptor, socket, this);
         ioc->run();
 #ifdef FCITX5_BEAST_HAS_UNIX_SOCKET
     }
