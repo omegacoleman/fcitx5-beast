@@ -32,11 +32,12 @@ FCITX_CONFIGURATION(BeastUnixSocketConfig,
                     Option<std::string> path{this, "Path", _("Path"),
                                              DEFAULT_UNIX_SOCKET_PATH};);
 
-FCITX_CONFIG_ENUM(BeastCommunication,
+enum class BeastCommunication { UnixSocket, TCP };
+FCITX_CONFIG_ENUM_NAME_WITH_I18N(BeastCommunication,
 #ifdef FCITX5_BEAST_HAS_UNIX_SOCKET
-                  UnixSocket,
+                                 N_("Unix Socket"),
 #endif
-                  Tcp);
+                                 N_("TCP"));
 
 FCITX_CONFIGURATION(BeastConfig,
                     Option<BeastCommunication> communication{
@@ -44,7 +45,7 @@ FCITX_CONFIGURATION(BeastConfig,
 #ifdef FCITX5_BEAST_HAS_UNIX_SOCKET
                         BeastCommunication::UnixSocket
 #else
-                        BeastCommunication::Tcp
+                        BeastCommunication::TCP
 #endif
                     };
 #ifdef FCITX5_BEAST_HAS_UNIX_SOCKET
@@ -53,7 +54,7 @@ FCITX_CONFIGURATION(BeastConfig,
                                                               _("Unix Socket"),
                                                               {}};
 #endif
-                    Option<BeastTcpConfig> tcp{this, "Tcp", _("Tcp"), {}};);
+                    Option<BeastTcpConfig> tcp{this, "TCP", _("TCP"), {}};);
 
 extern ConfigGetter configGetter_;
 extern ConfigSetter configSetter_;

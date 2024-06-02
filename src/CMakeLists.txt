@@ -1,10 +1,9 @@
-
-if (${ADDON_TYPE} STREQUAL "StaticLibrary")
+if ("${ADDON_TYPE}" STREQUAL "StaticLibrary")
     add_library(beast STATIC beast.cpp)
     target_link_libraries(beast Fcitx5::Core)
 endif()
 
-if (${ADDON_TYPE} STREQUAL "SharedLibrary")
+if ("${ADDON_TYPE}" STREQUAL "SharedLibrary")
     set(CMAKE_POSITION_INDEPENDENT_CODE ON)
     add_library(beast SHARED beast.cpp)
     target_link_libraries(beast Fcitx5::Core)
