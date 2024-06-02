@@ -1,12 +1,17 @@
 #include "beast.h"
 
 #include <boost/asio/generic/stream_protocol.hpp>
+#include <boost/asio/io_context.hpp>
 #include <boost/asio/local/stream_protocol.hpp>
 #include <boost/beast/core.hpp>
 #include <boost/beast/http.hpp>
+#include <boost/beast/websocket.hpp>
 
+#include <condition_variable>
 #include <fcitx-config/iniparser.h>
+#include <fcitx/event.h>
 #include <fcitx/inputcontextmanager.h>
+#include <queue>
 #include <unistd.h>
 
 #include "config/config-public.h"
@@ -20,6 +25,7 @@
 
 namespace beast = boost::beast;
 namespace http = beast::http;
+namespace websocket = beast::websocket;
 namespace net = boost::asio;
 using tcp = boost::asio::ip::tcp;
 
@@ -34,10 +40,10 @@ Beast::Beast(Instance *instance) : instance_(instance) {
 
 Beast::~Beast() { stopThread(); }
 
-std::string Beast::routedGetConfig(const std::string& uri) {
+std::string Beast::routedGetConfig(const std::string &uri) {
     std::promise<std::string> prom;
     auto fut = prom.get_future();
-    dispatcher_.schedule([this, &uri, &prom](){
+    dispatcher_.schedule([this, &uri, &prom]() {
         try {
             prom.set_value(getInstanceConfig(uri, this->instance_));
         } catch (...) {
@@ -47,10 +53,11 @@ std::string Beast::routedGetConfig(const std::string& uri) {
     return fut.get();
 }
 
-std::string Beast::routedSetConfig(const std::string& uri, const char* data, size_t sz) {
+std::string Beast::routedSetConfig(const std::string &uri, const char *data,
+                                   size_t sz) {
     std::promise<bool> prom;
     auto fut = prom.get_future();
-    dispatcher_.schedule([this, &uri, &prom, data, sz](){
+    dispatcher_.schedule([this, &uri, &prom, data, sz]() {
         try {
             prom.set_value(setInstanceConfig(uri, data, sz, this->instance_));
         } catch (...) {
@@ -58,9 +65,9 @@ std::string Beast::routedSetConfig(const std::string& uri, const char* data, siz
         }
     });
     if (!fut.get()) {
-      return nlohmann::json{{"ERROR", "Failed to set config"}}.dump();
+        return nlohmann::json{{"ERROR", "Failed to set config"}}.dump();
     } else {
-      return nlohmann::json{{}}.dump();
+        return nlohmann::json{{}}.dump();
     }
 }
 
@@ -71,7 +78,7 @@ void Beast::setConfig(const RawConfig &config) {
 }
 
 void Beast::reloadConfig() {
-    dispatcher_.schedule([this](){
+    dispatcher_.schedule([this]() {
         if (this->serverThread_.joinable()) {
             this->stopThread();
         }
@@ -80,11 +87,209 @@ void Beast::reloadConfig() {
     });
 }
 
+std::unordered_map<std::string, std::string>
+extract_params(fcitx::Instance *instance, fcitx::EventType typ,
+               fcitx::Event &event) {
+    std::unordered_map<std::string, std::string> params;
+
+    // TODO this should be put after InputContextEvent judge
+    auto &icEvent = static_cast<InputContextEvent &>(event);
+    auto *ic = icEvent.inputContext();
+    std::ostringstream ss;
+    ss << std::hex << std::setfill('0') << std::setw(2);
+    for (auto v : ic->uuid()) {
+        ss << static_cast<int>(v);
+    }
+    switch (typ) {
+    case EventType::InputContextSwitchInputMethod:
+        params["input_method"] = instance->inputMethod(ic);
+        // fallthrough
+    case EventType::InputContextFocusIn:
+        // fallthrough
+    case EventType::InputContextFocusOut:
+        params["uuid"] = ss.str();
+        params["program"] = ic->program();
+        params["frontend"] = ic->frontendName();
+        break;
+    default:
+        FCITX_WARN() << "cannot extract params";
+    }
+
+    return params;
+}
+
+template <class Stream>
+class ws_subscription
+    : public std::enable_shared_from_this<ws_subscription<Stream>> {
+public:
+    ws_subscription(Stream stream, Beast *addon)
+        : stream_(std::move(stream)), addon_(addon) {}
+
+    void watch(const std::string &evname) {
+        FCITX_INFO() << "subscribe: watching " << evname;
+        auto ev = convert_ev_name(evname);
+        if (static_cast<int>(ev) == 0) {
+            FCITX_WARN() << "unknown event to subscribe: " << evname;
+            return;
+        }
+        eventWatchers_.emplace_back(addon_->instance()->watchEvent(
+            ev, EventWatcherPhase::PostInputMethod,
+            [this, ev, evname](Event &event) {
+                this->post(evname,
+                           extract_params(this->addon_->instance(), ev, event));
+            }));
+    }
+
+    void watch_all() {
+        for (const auto &[k, v] : ev_map()) {
+            watch(k);
+        }
+    }
+
+    void start() { do_accept(); }
+
+    template <class Request>
+    void start(const Request &upgrade) {
+        do_accept(upgrade);
+    }
+
+private:
+    template <class Request>
+    void do_accept(const Request &upgrade) {
+        auto uptr = std::make_shared<const Request>(upgrade);
+        stream_.async_accept(*uptr, [this, uptr, sg = this->shared_from_this()](
+                                        boost::system::error_code ec) {
+            (void)sg;
+            (void)uptr;
+            this->accept_done(ec);
+        });
+    }
+
+    void do_accept() {
+        stream_.async_accept([this, sg = this->shared_from_this()](
+                                 boost::system::error_code ec) {
+            (void)sg;
+            this->accept_done(ec);
+        });
+    }
+
+    void accept_done(boost::system::error_code ec) {
+        if (ec) {
+            FCITX_ERROR() << "ws send: " << ec.message();
+            return;
+        }
+        do_recv();
+    }
+
+    static fcitx::EventType convert_ev_name(const std::string &name) {
+        auto it = ev_map().find(name);
+        if (it == ev_map().end())
+            return static_cast<fcitx::EventType>(0);
+        return it->second;
+    }
+
+    std::string
+    to_json_str(const std::string &ev,
+                const std::unordered_map<std::string, std::string> &params) {
+        nlohmann::json j{
+            {"event", ev},
+            {"params", nlohmann::json::object()},
+        };
+        for (const auto &[k, v] : params) {
+            j["params"][k] = v;
+        }
+        return j.dump();
+    }
+
+    void post(const std::string &ev,
+              const std::unordered_map<std::string, std::string> &params) {
+        std::string msg = to_json_str(ev, params);
+        std::unique_lock lg{mut_};
+        msgs_.emplace_back(msg);
+
+        if (!sending_) {
+            asio::post(
+                stream_.get_executor(),
+                [this, sg = this->shared_from_this()]() { this->do_send(); });
+        }
+    }
+
+    void do_send() {
+        std::unique_lock lg{mut_};
+        if (sending_)
+            return;
+        if (msgs_.size() && stream_.is_open()) {
+            msg_ = msgs_.front();
+            msgs_.pop_front();
+            sending_ = true;
+        } else {
+            return;
+        }
+        stream_.async_write(asio::buffer(msg_),
+                            [this, sg = this->shared_from_this()](
+                                boost::system::error_code ec, size_t sz) {
+                                this->send_done(ec, sz);
+                            });
+    }
+
+    void send_done(boost::system::error_code ec, size_t) {
+        msg_.clear();
+        if (ec) {
+            FCITX_ERROR() << "ws send: " << ec.message();
+        }
+        sending_ = false;
+        do_send();
+    }
+
+    void do_recv() {
+        stream_.async_read(buffer_,
+                           [this, sg = this->shared_from_this()](
+                               boost::system::error_code ec, size_t sz) {
+                               this->recv_done(ec, sz);
+                           });
+    }
+
+    void recv_done(boost::system::error_code ec, size_t sz) {
+        if (ec == websocket::error::closed)
+            return;
+        if (ec) {
+            FCITX_ERROR() << "ws recv: " << ec.message();
+            return;
+        }
+        buffer_.consume(sz);
+        do_recv();
+    }
+
+    static const std::unordered_map<std::string, fcitx::EventType> &ev_map() {
+        static const std::unordered_map<std::string, fcitx::EventType> ev_map{
+            {"input_context_focus_in", EventType::InputContextFocusIn},
+            {"input_context_focus_out", EventType::InputContextFocusOut},
+            {"input_context_switch_input_method",
+             EventType::InputContextSwitchInputMethod},
+        };
+
+        return ev_map;
+    }
+
+    std::mutex mut_;
+    std::list<std::string> msgs_;
+    bool sending_ = false;
+
+    std::string msg_;
+    beast::flat_buffer buffer_{8192};
+
+    std::vector<std::unique_ptr<HandlerTableEntry<EventHandler>>>
+        eventWatchers_;
+    Stream stream_;
+    Beast *addon_;
+};
+
 template <class Socket>
 class http_connection
     : public std::enable_shared_from_this<http_connection<Socket>> {
 public:
-    http_connection(Socket socket, Beast *addon) : socket_(std::move(socket)), addon_(addon) {}
+    http_connection(Socket socket, Beast *addon)
+        : socket_(std::move(socket)), addon_(addon) {}
 
     // Initiate the asynchronous operations associated with the connection.
     void start() { read_request(); }
@@ -103,7 +308,41 @@ private:
     http::response<http::dynamic_body> response_;
 
     // The addon.
-    Beast* addon_;
+    Beast *addon_;
+
+    void handle_subscribe(bool upgrade = true) && {
+        auto ws = std::make_shared<ws_subscription<websocket::stream<Socket>>>(
+            websocket::stream<Socket>{std::move(socket_)}, addon_);
+        if (upgrade) {
+            if (request_.target().starts_with("/subscribe/")) {
+                std::string_view sv{request_.target()};
+                sv.remove_prefix(11);
+                auto it = sv.begin();
+                auto beg = it;
+                while (it != sv.end()) {
+                    if (*it == '+') {
+                        if (it != beg) {
+                            std::string part{beg, it};
+                            ws->watch(part);
+                        }
+                        it++;
+                        beg = it;
+                    } else {
+                        it++;
+                    }
+                }
+                if (beg != sv.end()) {
+                    std::string part{beg, sv.end()};
+                    ws->watch(part);
+                }
+            } else {
+                ws->watch_all();
+            }
+            ws->start(request_);
+        } else {
+            ws->start();
+        }
+    }
 
     // Asynchronously receive a complete request message.
     void read_request() {
@@ -122,6 +361,12 @@ private:
     void process_request() {
         response_.version(request_.version());
         response_.keep_alive(false);
+
+        if (request_.target().starts_with("/subscribe") &&
+            websocket::is_upgrade(request_)) {
+            std::move(*this).handle_subscribe();
+            return;
+        }
 
         switch (request_.method()) {
         case http::verb::get:
@@ -160,11 +405,14 @@ private:
             if (request_.method() == http::verb::get) {
                 response_.result(http::status::ok);
                 response_.set(http::field::content_type, "application/json");
-                beast::ostream(response_.body()) << addon_->routedGetConfig(uri.c_str());
+                beast::ostream(response_.body())
+                    << addon_->routedGetConfig(uri.c_str());
             } else if (request_.method() == http::verb::post) {
                 response_.result(http::status::ok);
                 response_.set(http::field::content_type, "application/json");
-                beast::ostream(response_.body()) << addon_->routedSetConfig(uri.c_str(), request_.body().data(), request_.body().size());
+                beast::ostream(response_.body()) << addon_->routedSetConfig(
+                    uri.c_str(), request_.body().data(),
+                    request_.body().size());
             }
         } else {
             response_.result(http::status::not_found);
@@ -190,10 +438,12 @@ private:
 
 // "Loop" forever accepting new connections.
 template <class Acceptor, class Socket>
-void http_server(Acceptor &acceptor, Socket &socket, Beast* addon) {
-    acceptor.async_accept(socket, [&acceptor, &socket, addon](beast::error_code ec) {
+void http_server(Acceptor &acceptor, Socket &socket, Beast *addon) {
+    acceptor.async_accept(socket, [&acceptor, &socket,
+                                   addon](beast::error_code ec) {
         if (!ec)
-            std::make_shared<http_connection<Socket>>(std::move(socket), addon)->start();
+            std::make_shared<http_connection<Socket>>(std::move(socket), addon)
+                ->start();
         http_server(acceptor, socket, addon);
     });
 }
@@ -234,8 +484,10 @@ void Beast::startThread() {
 }
 
 void Beast::stopThread() {
-    ioc->stop();
-    serverThread_.join();
+    if (this->serverThread_.joinable()) {
+        ioc->stop();
+        serverThread_.join();
+    }
 }
 } // namespace fcitx
 
