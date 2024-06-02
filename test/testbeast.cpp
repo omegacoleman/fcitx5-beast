@@ -67,7 +67,7 @@ int main() {
     assert(std::system("lsof /tmp/fcitx5-another.sock") == 0);
 
     // Tcp default port works.
-    cfg.communication.setValue(BeastCommunication::Tcp);
+    cfg.communication.setValue(BeastCommunication::TCP);
     cfg.save(raw);
     beast->setConfig(raw);
     assert(std::system("lsof -i:32489") == 0);
