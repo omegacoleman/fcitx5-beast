@@ -59,6 +59,7 @@ public:
     std::string routedGetConfig(const std::string &uri);
     std::string routedSetConfig(const std::string &uri, const char *data,
                                 size_t sz);
+    std::string routedControllerRequest(const std::string &path);
 
     const Configuration *getConfig() const override { return &config_; }
     void setConfig(const RawConfig &config) override;

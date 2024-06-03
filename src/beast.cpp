@@ -15,6 +15,7 @@
 #include <unistd.h>
 
 #include "config/config-public.h"
+#include "controller/router.h"
 
 #include "nlohmann/json.hpp"
 
@@ -69,6 +70,20 @@ std::string Beast::routedSetConfig(const std::string &uri, const char *data,
     } else {
         return nlohmann::json{{}}.dump();
     }
+}
+
+std::string Beast::routedControllerRequest(const std::string &path) {
+    std::promise<std::string> prom;
+    auto fut = prom.get_future();
+    dispatcher_.schedule([this, &path, &prom]() {
+        try {
+            prom.set_value(
+                handle_controller_request(path, this->instance_).dump());
+        } catch (...) {
+            prom.set_exception(std::current_exception());
+        }
+    });
+    return fut.get();
 }
 
 void Beast::setConfig(const RawConfig &config) {
@@ -414,6 +429,12 @@ private:
                     uri.c_str(), request_.body().data(),
                     request_.body().size());
             }
+        } else if (request_.target().starts_with("/controller/")) {
+            std::string s = request_.target().substr(12);
+            response_.result(http::status::ok);
+            response_.set(http::field::content_type, "application/json");
+            beast::ostream(response_.body())
+                << addon_->routedControllerRequest(s);
         } else {
             response_.result(http::status::not_found);
             response_.set(http::field::content_type, "text/plain");
