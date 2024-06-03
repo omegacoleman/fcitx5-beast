@@ -34,10 +34,12 @@ websocat \
   --text \
   ws-c:unix:/tmp/fcitx5.sock -
 ```
+
+Now move your cursor between input boxes, it will output:
+
 ```json
 {"event":"input_context_focus_in","params":{"frontend":"xim","program":"xterm","uuid":"643ef6e072f04e6982af435f3d968852"}}
 {"event":"input_context_focus_out","params":{"frontend":"xim","program":"xterm","uuid":"643ef6e072f04e6982af435f3d968852"}}
-...
 ```
 
 Supported events:
@@ -81,7 +83,7 @@ curl -sS --unix-socket /tmp/fcitx5.sock http://fcitx/config/addon/webserver \
 
 ## misc
 
-Powered by[Boost.Beast](https://github.com/boostorg/beast)
+Powered by [Boost.Beast](https://github.com/boostorg/beast)
 
 Forked from [fcitx5-beast](https://github.com/fcitx-contrib/fcitx5-beast)
 
