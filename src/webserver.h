@@ -22,37 +22,38 @@ namespace asio = boost::asio;
 
 namespace fcitx {
 
-FCITX_CONFIGURATION(BeastTcpConfig, Option<int, IntConstrain> port{
-                                        this, "Port", _("Port"), DEFAULT_PORT,
-                                        IntConstrain(1024, 65535)};);
+FCITX_CONFIGURATION(WebServerTcpConfig,
+                    Option<int, IntConstrain> port{this, "Port", _("Port"),
+                                                   DEFAULT_PORT,
+                                                   IntConstrain(1024, 65535)};);
 
-FCITX_CONFIGURATION(BeastUnixSocketConfig,
+FCITX_CONFIGURATION(WebServerUnixSocketConfig,
                     Option<std::string> path{this, "Path", _("Path"),
                                              DEFAULT_UNIX_SOCKET_PATH};);
 
-FCITX_CONFIG_ENUM(BeastCommunication,
+FCITX_CONFIG_ENUM(WebServerCommunication,
 #ifdef FCITX5_BEAST_HAS_UNIX_SOCKET
                   UnixSocket,
 #endif
                   Tcp);
 
-FCITX_CONFIGURATION(BeastConfig,
-                    Option<BeastCommunication> communication{
+FCITX_CONFIGURATION(WebServerConfig,
+                    Option<WebServerCommunication> communication{
                         this, "Communication", _("Communication"),
 #ifdef FCITX5_BEAST_HAS_UNIX_SOCKET
-                        BeastCommunication::UnixSocket
+                        WebServerCommunication::UnixSocket
 #else
-                        BeastCommunication::Tcp
+                        WebServerCommunication::Tcp
 #endif
                     };
-                    Option<BeastTcpConfig> tcp{this, "Tcp", _("Tcp"), {}};
-                    Option<BeastUnixSocketConfig> unix_socket{
+                    Option<WebServerTcpConfig> tcp{this, "Tcp", _("Tcp"), {}};
+                    Option<WebServerUnixSocketConfig> unix_socket{
                         this, "Unix Socket", _("Unix Socket"), {}};);
 
-class Beast : public AddonInstance {
+class WebServer : public AddonInstance {
 public:
-    Beast(Instance *instance);
-    ~Beast();
+    WebServer(Instance *instance);
+    ~WebServer();
 
     Instance *instance() { return instance_; }
 
@@ -71,16 +72,16 @@ private:
     void stopThread();
     void startServer();
     Instance *instance_;
-    BeastConfig config_;
+    WebServerConfig config_;
     std::shared_ptr<asio::io_context> ioc;
     std::thread serverThread_;
     fcitx::EventDispatcher dispatcher_;
 };
 
-class BeastFactory : public AddonFactory {
+class WebServerFactory : public AddonFactory {
 public:
     AddonInstance *create(AddonManager *manager) override {
-        return new Beast(manager->instance());
+        return new WebServer(manager->instance());
     }
 };
 } // namespace fcitx

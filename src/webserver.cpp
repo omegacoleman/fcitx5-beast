@@ -1,4 +1,4 @@
-#include "beast.h"
+#include "webserver.h"
 
 #include <boost/asio/generic/stream_protocol.hpp>
 #include <boost/asio/io_context.hpp>
@@ -34,14 +34,14 @@ using tcp = boost::asio::ip::tcp;
 
 namespace fcitx {
 
-Beast::Beast(Instance *instance) : instance_(instance) {
+WebServer::WebServer(Instance *instance) : instance_(instance) {
     dispatcher_.attach(&instance->eventLoop());
     reloadConfig();
 }
 
-Beast::~Beast() { stopThread(); }
+WebServer::~WebServer() { stopThread(); }
 
-std::string Beast::routedGetConfig(const std::string &uri) {
+std::string WebServer::routedGetConfig(const std::string &uri) {
     std::promise<std::string> prom;
     auto fut = prom.get_future();
     dispatcher_.schedule([this, &uri, &prom]() {
@@ -54,8 +54,8 @@ std::string Beast::routedGetConfig(const std::string &uri) {
     return fut.get();
 }
 
-std::string Beast::routedSetConfig(const std::string &uri, const char *data,
-                                   size_t sz) {
+std::string WebServer::routedSetConfig(const std::string &uri, const char *data,
+                                       size_t sz) {
     std::promise<bool> prom;
     auto fut = prom.get_future();
     dispatcher_.schedule([this, &uri, &prom, data, sz]() {
@@ -72,7 +72,7 @@ std::string Beast::routedSetConfig(const std::string &uri, const char *data,
     }
 }
 
-std::string Beast::routedControllerRequest(const std::string &path) {
+std::string WebServer::routedControllerRequest(const std::string &path) {
     std::promise<std::string> prom;
     auto fut = prom.get_future();
     dispatcher_.schedule([this, &path, &prom]() {
@@ -86,13 +86,13 @@ std::string Beast::routedControllerRequest(const std::string &path) {
     return fut.get();
 }
 
-void Beast::setConfig(const RawConfig &config) {
+void WebServer::setConfig(const RawConfig &config) {
     config_.load(config);
     safeSaveAsIni(config_, ConfPath);
     reloadConfig();
 }
 
-void Beast::reloadConfig() {
+void WebServer::reloadConfig() {
     dispatcher_.schedule([this]() {
         if (this->serverThread_.joinable()) {
             this->stopThread();
@@ -106,7 +106,7 @@ template <class Stream>
 class ws_subscription
     : public std::enable_shared_from_this<ws_subscription<Stream>> {
 public:
-    ws_subscription(Stream stream, Beast *addon)
+    ws_subscription(Stream stream, WebServer *addon)
         : stream_(std::move(stream)), addon_(addon) {}
 
     void watch(const std::string &evname) {
@@ -241,14 +241,14 @@ private:
     std::vector<std::unique_ptr<HandlerTableEntry<EventHandler>>>
         eventWatchers_;
     Stream stream_;
-    Beast *addon_;
+    WebServer *addon_;
 };
 
 template <class Socket>
 class http_connection
     : public std::enable_shared_from_this<http_connection<Socket>> {
 public:
-    http_connection(Socket socket, Beast *addon)
+    http_connection(Socket socket, WebServer *addon)
         : socket_(std::move(socket)), addon_(addon) {}
 
     // Initiate the asynchronous operations associated with the connection.
@@ -268,7 +268,7 @@ private:
     http::response<http::dynamic_body> response_;
 
     // The addon.
-    Beast *addon_;
+    WebServer *addon_;
 
     void handle_subscribe(bool upgrade = true) && {
         auto ws = std::make_shared<ws_subscription<websocket::stream<Socket>>>(
@@ -332,7 +332,7 @@ private:
         case http::verb::get:
         case http::verb::post:
             response_.result(http::status::ok);
-            response_.set(http::field::server, "Beast");
+            response_.set(http::field::server, "WebServer");
             try {
                 create_response();
             } catch (const std::exception &e) {
@@ -404,7 +404,7 @@ private:
 
 // "Loop" forever accepting new connections.
 template <class Acceptor, class Socket>
-void http_server(Acceptor &acceptor, Socket &socket, Beast *addon) {
+void http_server(Acceptor &acceptor, Socket &socket, WebServer *addon) {
     acceptor.async_accept(socket, [&acceptor, &socket,
                                    addon](beast::error_code ec) {
         if (!ec)
@@ -414,11 +414,11 @@ void http_server(Acceptor &acceptor, Socket &socket, Beast *addon) {
     });
 }
 
-void Beast::startServer() {
+void WebServer::startServer() {
     ioc = std::make_shared<asio::io_context>();
 
 #ifdef FCITX5_BEAST_HAS_UNIX_SOCKET
-    if (config_.communication.value() == BeastCommunication::UnixSocket) {
+    if (config_.communication.value() == WebServerCommunication::UnixSocket) {
         auto path = config_.unix_socket.value().path.value();
         (void)::unlink(path.c_str());
         auto const ep = asio::local::stream_protocol::endpoint{path};
@@ -439,17 +439,17 @@ void Beast::startServer() {
 #endif
 }
 
-void Beast::startThread() {
+void WebServer::startThread() {
     serverThread_ = std::thread([this] {
         try {
             startServer();
         } catch (const std::exception &e) {
-            FCITX_ERROR() << "Error in Beast: " << e.what();
+            FCITX_ERROR() << "Error in WebServer: " << e.what();
         }
     });
 }
 
-void Beast::stopThread() {
+void WebServer::stopThread() {
     if (this->serverThread_.joinable()) {
         ioc->stop();
         serverThread_.join();
@@ -458,5 +458,5 @@ void Beast::stopThread() {
 } // namespace fcitx
 
 #ifdef FCITX_BEAST_IS_SHARED
-FCITX_ADDON_FACTORY(fcitx::BeastFactory)
+FCITX_ADDON_FACTORY(fcitx::WebServerFactory)
 #endif

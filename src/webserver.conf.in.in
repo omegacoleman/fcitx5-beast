@@ -1,9 +1,9 @@
 [Addon]
 Name=Web server
-Comment=Interact with fcitx5 via HTTP, powered by Boost.Beast
+Comment=Interact with fcitx5 via HTTP and Websocket
 Category=Module
 Version=@PROJECT_VERSION@
-Library=libbeast
+Library=libwebserver
 Type=@ADDON_TYPE@
 OnDemand=False
 Configurable=True
