@@ -72,6 +72,21 @@ int main() {
     beast->setConfig(raw);
     assert(std::system("lsof -i:32489") == 0);
 
+    getterCalled = false;
+    setterCalled = false;
+
+    // Getter works over TCP.
+    assert(!getterCalled);
+    assert(std::system("curl "
+                       "http://127.0.0.1:32489/config/addon/beast") == 0);
+    assert(getterCalled);
+
+    // Setter works ovet TCP.
+    assert(!setterCalled);
+    assert(std::system("curl -X POST -d '{}' "
+                       "http://127.0.0.1:32489/config/addon/beast") == 0);
+    assert(setterCalled);
+
     // Tcp port reset works.
     cfg.tcp.mutableValue()->port.setValue(32490);
     cfg.save(raw);
