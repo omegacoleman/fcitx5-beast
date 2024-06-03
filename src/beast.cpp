@@ -16,6 +16,8 @@
 
 #include "config/config-public.h"
 #include "controller/router.h"
+#include "subscribe/ev_map.h"
+#include "subscribe/serializing.hpp"
 
 #include "nlohmann/json.hpp"
 
@@ -29,8 +31,6 @@ namespace http = beast::http;
 namespace websocket = beast::websocket;
 namespace net = boost::asio;
 using tcp = boost::asio::ip::tcp;
-
-nlohmann::json configToJson(const fcitx::Configuration &config);
 
 namespace fcitx {
 
@@ -100,37 +100,6 @@ void Beast::reloadConfig() {
         readAsIni(config_, ConfPath);
         this->startThread();
     });
-}
-
-std::unordered_map<std::string, std::string>
-extract_params(fcitx::Instance *instance, fcitx::EventType typ,
-               fcitx::Event &event) {
-    std::unordered_map<std::string, std::string> params;
-
-    // TODO this should be put after InputContextEvent judge
-    auto &icEvent = static_cast<InputContextEvent &>(event);
-    auto *ic = icEvent.inputContext();
-    std::ostringstream ss;
-    ss << std::hex << std::setfill('0') << std::setw(2);
-    for (auto v : ic->uuid()) {
-        ss << static_cast<int>(v);
-    }
-    switch (typ) {
-    case EventType::InputContextSwitchInputMethod:
-        params["input_method"] = instance->inputMethod(ic);
-        // fallthrough
-    case EventType::InputContextFocusIn:
-        // fallthrough
-    case EventType::InputContextFocusOut:
-        params["uuid"] = ss.str();
-        params["program"] = ic->program();
-        params["frontend"] = ic->frontendName();
-        break;
-    default:
-        FCITX_WARN() << "cannot extract params";
-    }
-
-    return params;
 }
 
 template <class Stream>
@@ -203,19 +172,6 @@ private:
         return it->second;
     }
 
-    std::string
-    to_json_str(const std::string &ev,
-                const std::unordered_map<std::string, std::string> &params) {
-        nlohmann::json j{
-            {"event", ev},
-            {"params", nlohmann::json::object()},
-        };
-        for (const auto &[k, v] : params) {
-            j["params"][k] = v;
-        }
-        return j.dump();
-    }
-
     void post(const std::string &ev,
               const std::unordered_map<std::string, std::string> &params) {
         std::string msg = to_json_str(ev, params);
@@ -273,17 +229,6 @@ private:
         }
         buffer_.consume(sz);
         do_recv();
-    }
-
-    static const std::unordered_map<std::string, fcitx::EventType> &ev_map() {
-        static const std::unordered_map<std::string, fcitx::EventType> ev_map{
-            {"input_context_focus_in", EventType::InputContextFocusIn},
-            {"input_context_focus_out", EventType::InputContextFocusOut},
-            {"input_context_switch_input_method",
-             EventType::InputContextSwitchInputMethod},
-        };
-
-        return ev_map;
     }
 
     std::mutex mut_;
